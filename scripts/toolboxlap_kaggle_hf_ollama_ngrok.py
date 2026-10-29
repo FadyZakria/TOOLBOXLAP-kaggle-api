@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/init/env python3
 """TOOLBOXLAP Kaggle launcher and OpenAI-compatible Ollama proxy.
 
 Run with no arguments in a Kaggle GPU notebook. Use --serve internally to
@@ -84,12 +84,10 @@ def normalize_model(raw: str) -> str:
             raise ValueError("A Hugging Face URL must include owner and repository.")
         owner, repository = parts[0], parts[1]
         tag = ""
-        # /owner/repo/{blob,resolve}/branch/file.gguf → :file
         if len(parts) >= 5 and parts[2] in {"blob", "resolve"}:
             filename = parts[-1]
             if filename.lower().endswith(".gguf"):
                 tag = ":" + filename[:-5]
-        # /owner/repo?revision=Q4_K_M and URL fragments are convenient tags.
         query_tag = re.search(r"(?:revision|tag)=([^&]+)", parsed.query)
         if query_tag:
             tag = ":" + unquote(query_tag.group(1))
@@ -152,7 +150,6 @@ def pull_and_load(model: str, context: int) -> None:
 def placement_uses_cpu() -> tuple[bool, str]:
     result = subprocess.run(["ollama", "ps"], capture_output=True, text=True, check=True)
     output = result.stdout.strip()
-    # Ollama reports mixed placement as e.g. "79%/21% CPU/GPU" or a CPU processor.
     uses_cpu = bool(re.search(r"\bCPU\b", output, flags=re.IGNORECASE))
     return uses_cpu, output
 
@@ -199,42 +196,23 @@ def tunnel_url(timeout: int = 45) -> str:
     raise TimeoutError("ngrok did not publish an HTTPS tunnel.")
 
 
-
 def sanitize_tool_schema(value: Any) -> Any:
-    """Make common agent-generated JSON Schema safer for Ollama's Go parser."""
     if isinstance(value, list):
         return [sanitize_tool_schema(item) for item in value]
-
     if not isinstance(value, dict):
         return value
-
     cleaned: dict[str, Any] = {}
     for key, item in value.items():
-        # Ollama's OpenAI-compatible tool parser does not document these
-        # OpenAI-specific schema/function extensions.
         if key in {"strict", "$schema"}:
             continue
-
-        # Some generators can emit conditional required objects. Ollama's
-        # parser expects required to be an array of strings.
         if key == "required" and not isinstance(item, list):
             continue
-
         cleaned[key] = sanitize_tool_schema(item)
-
     return cleaned
 
 
 def build_safe_openai_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """
-    Build a minimal OpenAI-compatible request for an Ollama retry.
-
-    The first request preserves the client's compatible fields. If Ollama
-    rejects that request with a 4xx validation error, the proxy retries once
-    with provider-specific extras removed.
-    """
     safe = dict(payload)
-
     safe.pop("tool_choice", None)
     safe.pop("parallel_tool_calls", None)
     safe.pop("store", None)
@@ -247,9 +225,6 @@ def build_safe_openai_payload(payload: dict[str, Any]) -> dict[str, Any]:
     safe.pop("max_completion_tokens", None)
     safe.pop("stream_options", None)
 
-    # If JSON-schema response formatting is the incompatible part, let the
-    # second attempt proceed as a normal text response rather than failing
-    # the whole agent request.
     response_format = safe.get("response_format")
     if isinstance(response_format, dict) and response_format.get("type") == "json_schema":
         safe.pop("response_format", None)
@@ -270,7 +245,6 @@ def proxy_request_with_compat_retry(
     payload: dict[str, Any],
     headers: dict[str, str],
 ) -> Any:
-    """POST to Ollama; on HTTP 400/422, retry once with a sanitized body."""
     requests = require_requests()
 
     upstream = requests.post(
@@ -278,7 +252,7 @@ def proxy_request_with_compat_retry(
         json=payload,
         headers=headers,
         stream=bool(payload.get("stream")),
-        timeout=900,
+        timeout=(30, 900),
     )
 
     if upstream.status_code not in {400, 422}:
@@ -287,44 +261,25 @@ def proxy_request_with_compat_retry(
     first_error = upstream.text[:4000]
     safe_payload = build_safe_openai_payload(payload)
 
-    # Streaming responses are not buffered, so the retry can only safely be
-    # performed when the first response is a validation failure.
     retry = requests.post(
         f"{OLLAMA_URL}/v1/chat/completions",
         json=safe_payload,
         headers=headers,
         stream=bool(safe_payload.get("stream")),
-        timeout=900,
+        timeout=(30, 900),
     )
 
     if retry.status_code >= 400:
-        print(
-            f"⚠️ Ollama first response HTTP {upstream.status_code}: "
-            f"{first_error}",
-            flush=True,
-        )
-        print(
-            f"⚠️ Ollama compatibility retry HTTP {retry.status_code}: "
-            f"{retry.text[:4000]}",
-            flush=True,
-        )
+        print(f"⚠️ Ollama first response HTTP {upstream.status_code}: {first_error}", flush=True)
+        print(f"⚠️ Ollama compatibility retry HTTP {retry.status_code}: {retry.text[:4000]}", flush=True)
     else:
-        print(
-            f"ℹ️ TOOLBOXLAP compatibility retry succeeded after "
-            f"HTTP {upstream.status_code}.",
-            flush=True,
-        )
+        print(f"ℹ️ TOOLBOXLAP compatibility retry succeeded after HTTP {upstream.status_code}.", flush=True)
 
     upstream.close()
     return retry
 
 
 def serve_proxy(backend: str, port: int) -> None:
-    """Run the TOOLBOXLAP proxy in the current process.
-
-    This is intentionally Flask/thread based because it matches the known-good
-    Kaggle V6 execution path and keeps streaming requests simple.
-    """
     try:
         from flask import Flask, Response, jsonify, request, stream_with_context
     except ImportError:
@@ -377,8 +332,6 @@ def serve_proxy(backend: str, port: int) -> None:
                 "error": {"message": "JSON body required."}
             }), 400
 
-        # Keep the client-facing ID stable and route internally to the selected
-        # backend. Preserve the rest of the client's OpenAI-compatible payload.
         body["model"] = backend
         body["reasoning_effort"] = "none"
 
@@ -396,7 +349,7 @@ def serve_proxy(backend: str, port: int) -> None:
                 headers=forwarded_headers(),
                 json=body,
                 stream=True,
-                timeout=900,
+                timeout=(30, 900),  # تم تعديل الـ Timeout لتجنب الانقطاع أثناء التوليد الطويل
             )
         except requests.RequestException as exc:
             return jsonify({
@@ -608,7 +561,6 @@ def interactive(
 
         requests = require_requests()
 
-        # Verify exactly the public path Cline will call.
         public_test = requests.post(
             public_url + "/v1/chat/completions",
             headers={
