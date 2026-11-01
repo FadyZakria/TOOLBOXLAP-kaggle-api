@@ -349,7 +349,7 @@ def serve_proxy(backend: str, port: int) -> None:
                 headers=forwarded_headers(),
                 json=body,
                 stream=True,
-                timeout=(30, 900),  # مهلة اتصال وقراءة ممتدة
+                timeout=(30, 900),  # تم تعديل الـ Timeout لتجنب الانقطاع أثناء التوليد الطويل
             )
         except requests.RequestException as exc:
             return jsonify({
@@ -366,13 +366,10 @@ def serve_proxy(backend: str, port: int) -> None:
             def generate():
                 try:
                     for chunk in upstream.iter_content(
-                        chunk_size=1024,  # حجم أصغر لتدفق أسرع وأكثر استقراراً بدون تعليق
-                        decode_content=True
+                        chunk_size=8192
                     ):
                         if chunk:
                             yield chunk
-                except requests.exceptions.Timeout:
-                    print("⚠️ Streaming read timed out from Ollama backend.", flush=True)
                 finally:
                     upstream.close()
 
@@ -380,7 +377,6 @@ def serve_proxy(backend: str, port: int) -> None:
                 generate(),
                 status=upstream.status_code,
                 content_type=content_type,
-                direct_passthrough=True  # منع الـ buffering نهائياً وإرسال البيانات للعميل فوراً
             )
 
         return Response(
